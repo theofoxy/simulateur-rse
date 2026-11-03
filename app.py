@@ -55,7 +55,7 @@ perte_pct_input = st.sidebar.slider(
     max_value=100,
     value=10,
     step=1,
-    help="Part du stock textile non restituée à la fin de l'événement (facturée 26 € HT par paire manquante)."
+    help="Part du stock textile non restituée (<5% : 12 €/p, entre 5% et 10% : 18 €/p, >10% : 26 €/p)."
 )
 perte_pct = perte_pct_input / 100.0
 
@@ -64,14 +64,14 @@ usure_pct_input = st.sidebar.slider(
     min_value=0,
     max_value=100,
     value=0,
-    step=5,
+    step=1,
     help="Degré d'usure avant égarement (la précaution ADEME recommande 0 % : paire neuve perdue dès le début)."
 )
 usure_pct = usure_pct_input / 100.0
 
 # --- 2. CONSTANTES MÉTIER & ADEME ---
 PRIX_JETABLE = 0.19        # Coût unitaire d'une housse plastique (€ HT)
-PRIX_NEUF_PAIRE = 26.00    # Facturation ou rachat d'une paire textile neuve (€ HT)
+PRIX_NEUF_PAIRE = 26.00    # Valeur de référence d'une paire textile neuve hors barème perte (€ HT)
 LIVRAISON_FIXE = 100.00    # Forfait transport aller-retour standard (€ HT)
 
 POIDS_JETABLE = 0.009      # 9 g par housse polyéthylène
@@ -89,6 +89,38 @@ def get_forfait_loc(stock, nb_jours):
     tarif_jour = 52.0 if stock <= 100 else 90.0
     return max(280.0, tarif_jour * nb_jours)
 
+def get_tarif_unitaire_perte(taux_perte_ratio):
+    """
+    Règle de tarification selon le taux global de perte :
+    - Strictement inférieur à 5% (< 5%) : 12 € HT par paire perdue
+    - Entre 5% et 10% compris (5% à 10%) : 18 € HT par paire perdue
+    - Strictement supérieur à 10% (> 10%) : 26 € HT par paire perdue
+    """
+    if taux_perte_ratio < 0.05:
+        return 12.00
+    elif taux_perte_ratio <= 0.10:
+        return 18.00
+    else:
+        return 26.00
+
+def get_seuil_max_pertes(budget_max_penalite, stock_total):
+    """Trouve le nombre max de paires pouvant être perdues avant dépassement budgétaire."""
+    if budget_max_penalite <= 0 or stock_total <= 0:
+        return 0, 0.0
+    max_paires = 0
+    max_pct = 0.0
+    for p in range(1, 101):
+        p_ratio = p / 100.0
+        nb_p = round(stock_total * p_ratio)
+        tarif = get_tarif_unitaire_perte(p_ratio)
+        cout = nb_p * tarif
+        if cout <= budget_max_penalite:
+            max_paires = nb_p
+            max_pct = p
+        else:
+            break
+    return max_paires, float(max_pct)
+
 # --- 3. MOTEUR DE CALCULS ---
 vol_jetable = int(jours * personnes * rotations_jour)
 stock_circulaire = int(personnes)
@@ -97,7 +129,8 @@ paires_rendues = int(stock_circulaire - paires_perdues)
 
 # Volet financier
 budget_jetable = vol_jetable * PRIX_JETABLE
-amende_pertes = paires_perdues * PRIX_NEUF_PAIRE
+tarif_unitaire_perte = get_tarif_unitaire_perte(perte_pct)
+amende_pertes = paires_perdues * tarif_unitaire_perte
 forfait_loc = get_forfait_loc(stock_circulaire, jours)
 budget_location = forfait_loc + LIVRAISON_FIXE + amende_pertes
 cout_usage_achat = ((stock_circulaire * PRIX_NEUF_PAIRE) / 100.0) * jours
@@ -127,7 +160,7 @@ def afficher_recap_parametres():
         r1.write(f"⏱️ **Durée :** {jours} jours")
         r2.write(f"👥 **Effectif :** {personnes} pers./jour")
         r3.write(f"🔄 **Rotations :** {rotations_jour} paires/j")
-        r4.write(f"⚠️ **Pertes estimées :** {perte_pct_input} %")
+        r4.write(f"⚠️ **Pertes estimées :** {perte_pct_input} % (Tarif : {tarif_unitaire_perte:.2f} €/p)")
 
 # ==============================================================================
 # SECTION A : FLUX PHYSIQUES & VOLUMÉTRIE
@@ -146,13 +179,6 @@ st.divider()
 # ==============================================================================
 st.subheader("💰 Synthèse Budgétaire (TCO - Coût Total de Possession)")
 
-with st.expander("🔍 Méthodologie détaillée : comment sont calculés les budgets ?"):
-    st.markdown(f"""
-    * **Scénario Jetable :** Achat direct du volume consommé ({vol_jetable:,} housses $\\times$ {PRIX_JETABLE:.2f} € HT = **{budget_jetable:,.2f} € HT**).
-    * **Scénario Location :** Mise à disposition du parc ({forfait_loc:,.0f} €) + transport logistique aller-retour standard ({LIVRAISON_FIXE:,.0f} €) + refacturation des paires égarées ({paires_perdues} paires $\\times$ {PRIX_NEUF_PAIRE:.0f} € = {amende_pertes:,.0f} €).
-    * **Scénario Achat d'un stock réutilisable :** Amortissement d'usage sur 100 cycles ({cout_usage_achat:,.2f} €) + rachat immédiat à neuf des {paires_perdues} paires perdues ({amende_pertes:,.0f} €) pour maintenir l'intégralité du capital initial.
-    """)
-
 b1, b2, b3 = st.columns(3)
 b1.metric("Option Jetable", f"{budget_jetable:,.0f} €".replace(",", " "))
 b2.metric(
@@ -165,6 +191,42 @@ b3.metric(
     f"{budget_achat:,.0f} €".replace(",", " "),
     delta=f"{budget_jetable - budget_achat:,.0f} € vs Jetable"
 )
+
+# --- BLOC D'ANALYSE DU COÛT SELON LE TAUX DE PERTE ---
+if paires_perdues == 0:
+    st.success(
+        "💡 **Pertes nulles (0 %) :** Aucune pénalité appliquée. "
+        "Le modèle réutilisable est exploité à son efficience économique maximale."
+    )
+elif perte_pct < 0.05:
+    st.info(
+        f"📊 **Taux de perte < 5 % ({perte_pct_input} %) :** "
+        f"Chaque paire égarée est facturée **12,00 € HT**. "
+        f"Facturation totale des pertes : {paires_perdues} paires × 12,00 € = **{amende_pertes:,.2f} € HT**."
+    )
+elif perte_pct <= 0.10:
+    st.warning(
+        f"⚠️ **Taux de perte entre 5 % et 10 % ({perte_pct_input} %) :** "
+        f"Le tarif monte à **18,00 € HT** pour chaque paire égarée. "
+        f"Facturation totale des pertes : {paires_perdues} paires × 18,00 € = **{amende_pertes:,.2f} € HT**."
+    )
+else:
+    st.error(
+        f"🚨 **Taux de perte > 10 % ({perte_pct_input} %) :** "
+        f"Le tarif maximal s'applique : **26,00 € HT** pour chaque paire égarée. "
+        f"Facturation totale des pertes : {paires_perdues} paires × 26,00 € = **{amende_pertes:,.2f} € HT**."
+    )
+
+with st.expander("🔍 Méthodologie détaillée : comment sont calculés les budgets et les pertes ?"):
+    st.markdown(f"""
+    * **Règle de tarification des pertes textiles :** Le coût unitaire appliqué à l'ensemble des paires égarées dépend directement du taux de perte constaté sur l'événement :
+      * **Moins de 5 % (< 5 %) :** **12,00 € HT** par paire.
+      * **Entre 5 % et 10 % compris (5 % à 10 %) :** **18,00 € HT** par paire.
+      * **Au-delà de 10 % (> 10 %) :** **26,00 € HT** par paire.
+    * **Scénario Jetable :** Achat direct du volume consommé ({vol_jetable:,} housses × {PRIX_JETABLE:.2f} € HT = **{budget_jetable:,.2f} € HT**).
+    * **Scénario Location :** Mise à disposition du parc ({forfait_loc:,.0f} €) + transport logistique ({LIVRAISON_FIXE:,.0f} €) + facturation des {paires_perdues} paires à {tarif_unitaire_perte:.2f} € HT (**{amende_pertes:,.2f} € HT**).
+    * **Scénario Achat d'un stock réutilisable :** Amortissement d'usage sur 100 cycles ({cout_usage_achat:,.2f} €) + rachat des {paires_perdues} paires perdues au tarif de {tarif_unitaire_perte:.2f} € HT (**{amende_pertes:,.2f} € HT**).
+    """)
 
 # Graphique Budgets : Ordre strict (Jetable à gauche, Location au centre, Achat à droite)
 df_budget = pd.DataFrame({
@@ -322,17 +384,18 @@ st.divider()
 st.subheader("🎯 Seuils de Rupture & Sensibilité aux Pertes (Break-Even)")
 
 st.write(
-    "Ce graphique modélise l'évolution budgétaire de chaque solution selon le taux de perte terrain (de 0 % à 100 %). "
-    "**La ligne rouge (Jetable) représente le plafond de dépense.**"
+    "Ce graphique modélise l'évolution budgétaire selon le taux de perte terrain (de 0 % à 100 %). "
+    "**Le coût unitaire de chaque paire perdue est de 12 € (< 5 %), 18 € (5 % à 10 %) et 26 € (> 10 %).**"
 )
 
-pertes_gamme = list(range(0, 101, 2))
+pertes_gamme = list(range(0, 101, 1))
 data_courbes = []
 
 for p in pertes_gamme:
     p_ratio = p / 100.0
     nb_p = round(stock_circulaire * p_ratio)
-    penalite = nb_p * PRIX_NEUF_PAIRE
+    tarif_p = get_tarif_unitaire_perte(p_ratio)
+    penalite = nb_p * tarif_p
     cout_loc = forfait_loc + LIVRAISON_FIXE + penalite
     cout_ach = cout_usage_achat + penalite
     
@@ -364,13 +427,12 @@ regle_actuelle = alt.Chart(point_actuel).mark_rule(
 
 st.altair_chart(courbe_chart + regle_actuelle, use_container_width=True)
 
+# Calcul précis des seuils de rentabilité
 marge_loc_brute = budget_jetable - (forfait_loc + LIVRAISON_FIXE)
-pertes_max_loc = int(marge_loc_brute / PRIX_NEUF_PAIRE) if marge_loc_brute > 0 else 0
-seuil_loc_pct = (pertes_max_loc / stock_circulaire) * 100.0 if stock_circulaire > 0 else 0
+pertes_max_loc, seuil_loc_pct = get_seuil_max_pertes(marge_loc_brute, stock_circulaire)
 
 marge_achat_brute = budget_jetable - cout_usage_achat
-pertes_max_achat = int(marge_achat_brute / PRIX_NEUF_PAIRE) if marge_achat_brute > 0 else 0
-seuil_achat_pct = (pertes_max_achat / stock_circulaire) * 100.0 if stock_circulaire > 0 else 0
+pertes_max_achat, seuil_achat_pct = get_seuil_max_pertes(marge_achat_brute, stock_circulaire)
 
 denom_eco = co2_perdue_unit - co2_rendue_unit
 bep_eco_pct = ((co2_jetable / stock_circulaire) - co2_rendue_unit) / denom_eco if denom_eco > 0 else 1.0
@@ -386,18 +448,18 @@ with k1:
             f"(surcoût initial de {surcout_base:,.0f} € HT)."
         )
         if marge_achat_brute > 0:
-            st.info(f"💡 **Alternative économique :** L'**Achat d'un stock réutilisable** reste rentable jusqu'à **{pertes_max_achat} paires égarées** ({seuil_achat_pct:.1f} % du stock).")
+            st.info(f"💡 **Alternative économique :** L'**Achat d'un stock réutilisable** reste rentable jusqu'à **{pertes_max_achat} paires égarées** ({seuil_achat_pct:.0f} % du stock).")
     else:
         if paires_perdues > pertes_max_loc:
             st.error(
-                f"🚨 **Déficit budgétaire :** Avec {paires_perdues} paires perdues ({amende_pertes:,.0f} € de refacturation), "
+                f"🚨 **Déficit budgétaire :** Avec {paires_perdues} paires perdues ({amende_pertes:,.0f} € facturés à {tarif_unitaire_perte:.0f} €/p), "
                 f"la location est plus chère que le jetable de {budget_location - budget_jetable:,.0f} €. "
-                f"Le seuil de bascule se situe à **{seuil_loc_pct:.1f} %** (soit max **{pertes_max_loc} paires**)."
+                f"Le seuil de rentabilité se situe à **{seuil_loc_pct:.0f} %** (soit max **{pertes_max_loc} paires**)."
             )
         else:
             st.success(
                 f"✅ **Rentabilité préservée :** Vos {paires_perdues} paires perdues restent sous la limite de **{pertes_max_loc} paires** "
-                f"({seuil_loc_pct:.1f} % du parc). Gain net : **{budget_jetable - budget_location:,.0f} €** par rapport au jetable."
+                f"({seuil_loc_pct:.0f} % du parc). Gain net : **{budget_jetable - budget_location:,.0f} €** par rapport au jetable."
             )
 
 with k2:
@@ -428,7 +490,7 @@ st.subheader("📄 Synthèse Client & Export PDF")
 
 class PDFExecutive(FPDF):
     def header(self):
-        self.set_fill_color(31, 78, 121)  # Bleu professionnel
+        self.set_fill_color(31, 78, 121)
         self.rect(0, 0, 210, 24, 'F')
         self.set_font("helvetica", "B", 13)
         self.set_text_color(255, 255, 255)
@@ -459,7 +521,8 @@ def generer_pdf_client():
     pdf.cell(95, 6, f"- Duree du chantier : {jours} jours", new_x="RIGHT")
     pdf.cell(95, 6, f"- Effectif equipe : {personnes} personnes / jour", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(95, 6, f"- Rotations jetables : {rotations_jour} paires / pers. / jour", new_x="RIGHT")
-    pdf.cell(95, 6, f"- Pertes textiles prevues : {perte_pct_input} % ({paires_perdues} paires)", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(95, 6, f"- Pertes prevues : {perte_pct_input} % ({paires_perdues} p. a {tarif_unitaire_perte:.2f} EUR/p)", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(95, 6, f"- Usure paires perdues : {usure_pct_input} %", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
     
     # 2. VOLUMETRIE
@@ -472,8 +535,8 @@ def generer_pdf_client():
     pdf.set_text_color(40, 40, 40)
     pdf.cell(95, 6, f"* Housses jetables consommees : {vol_jetable:,} unites".replace(",", " "), new_x="RIGHT")
     pdf.cell(95, 6, f"* Stock reutilisable mobilise : {stock_circulaire:,} paires".replace(",", " "), new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(95, 6, f"* Paires perdues / degradees : {paires_perdues:,} paires".replace(",", " "), new_x="RIGHT")
-    pdf.cell(95, 6, f"* Paires lavees et remises en stock : {paires_rendues:,} paires".replace(",", " "), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(95, 6, f"* Paires perdues / degradees : {paires_perdues:,} paires", new_x="RIGHT")
+    pdf.cell(95, 6, f"* Paires lavees et remises en stock : {paires_rendues:,} paires", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
     
     # 3. BUDGETS
@@ -482,7 +545,6 @@ def generer_pdf_client():
     pdf.cell(0, 8, "3. SYNTHESE BUDGETAIRE GLOBALE (TCO)", border="B", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
     
-    # En-tête tableau budgets
     pdf.set_fill_color(240, 240, 240)
     pdf.set_font("helvetica", "B", 9)
     pdf.cell(70, 7, "Option", border=1, fill=True, new_x="RIGHT")
@@ -533,7 +595,7 @@ def generer_pdf_client():
     pdf.cell(45, 7, f"{diff_eau:+,.0f} L", border=1, align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
     
-    # 5. CONCLUSION BREAK-EVEN
+    # 5. CONCLUSION DECISIONNELLE (BREAK-EVEN)
     pdf.set_font("helvetica", "B", 11)
     pdf.set_text_color(31, 78, 121)
     pdf.cell(0, 8, "5. CONCLUSION DECISIONNELLE (BREAK-EVEN)", border="B", new_x="LMARGIN", new_y="NEXT")
@@ -544,7 +606,7 @@ def generer_pdf_client():
     if marge_loc_brute < 0:
         verdict = f"La location est defavorable face au jetable (+{(forfait_loc + LIVRAISON_FIXE) - budget_jetable:,.0f} EUR des 0% de perte). Privilegier l'achat amorti ou une mutualisation."
     else:
-        verdict = f"La location est recommandee et rentable jusqu'a {pertes_max_loc} paires egarees ({seuil_loc_pct:.1f}% de perte autorisee)."
+        verdict = f"La location est recommandee et rentable jusqu'a {pertes_max_loc} paires egarees ({seuil_loc_pct:.0f}% de perte autorisee)."
     
     pdf.multi_cell(190, 5, verdict)
     return bytes(pdf.output())
