@@ -69,33 +69,80 @@ usure_pct_input = st.sidebar.slider(
 )
 usure_pct = usure_pct_input / 100.0
 
+reassorts = st.sidebar.number_input(
+    "Passages de coursier / réassort (facultatif)",
+    min_value=0,
+    max_value=20,
+    value=0,
+    step=1,
+    help="Nombre de passages d'un coursier pour échanger le linge sale contre du propre en cours d'événement (hors livraison/reprise initiale incluse à 100 €)."
+)
+
 # --- 2. CONSTANTES MÉTIER & ADEME ---
 PRIX_JETABLE = 0.19        # Coût unitaire d'une housse plastique (€ HT)
 PRIX_NEUF_PAIRE = 26.00    # Valeur de référence d'une paire textile neuve hors barème perte (€ HT)
 LIVRAISON_FIXE = 100.00    # Forfait transport aller-retour standard (€ HT)
 
-POIDS_JETABLE = 0.009      # 9 g par housse polyéthylène
+POIDS_JETABLE = 0.009      # 9 g par paire jetable
 FE_PLASTIQUE_FAB = 6.90    # kg CO2 / kg PE vierge (ADEME)
 FE_INCINERATION = 2.27     # kg CO2 / kg incinéré (ADEME)
-EAU_PLASTIQUE_L_KG = 10.0  # Litres d'eau / kg plastique vierge (synthèse industrielle)
+EAU_PLASTIQUE_L_KG = 50.0  # Litres d'eau / kg plastique vierge (ADEME)
 
 POIDS_TEXTILE = 0.090      # 90 g par paire textile tissée
 FE_PA_FAB = 13.20          # kg CO2 / kg Polyamide (ADEME)
 FE_RECYCLAGE_PA = 0.401    # kg CO2 / kg recyclé (ADEME)
+EAU_FAB_PA_L_KG = 150.0    # Litres d'eau / kg fabrication textile
 EAU_LAVAGE_L_KG = 15.0     # Litres d'eau / kg textile lavé en blanchisserie
 FE_EAU_M3 = 0.132          # kg CO2 / m3 d'eau traitée
 
+# --- MATRICE TARIFAIRE OFFICIELLE EXCEL ---
 def get_forfait_loc(stock, nb_jours):
-    tarif_jour = 52.0 if stock <= 100 else 90.0
-    return max(280.0, tarif_jour * nb_jours)
+    paliers_stock = [50, 100, 150, 200, 250, 300, 400, 500]
+    seuils_jours = [1, 4, 10, 17, 24]
+    
+    grille = {
+        50:  [150.0, 195.0, 240.0, 285.0, 330.0],
+        100: [280.0, 364.0, 448.0, 532.0, 616.0],
+        150: [405.0, 526.5, 648.0, 769.5, 891.0],
+        200: [520.0, 676.0, 832.0, 988.0, 1144.0],
+        250: [625.0, 812.5, 1000.0, 1187.5, 1375.0],
+        300: [720.0, 936.0, 1152.0, 1368.0, 1584.0],
+        400: [880.0, 1144.0, 1408.0, 1672.0, 1936.0],
+        500: [1050.0, 1365.0, 1680.0, 1995.0, 2310.0]
+    }
+    
+    # Matching jours (MATCH avec 1 dans Excel)
+    j_idx = 0
+    for idx, s in enumerate(seuils_jours):
+        if nb_jours >= s:
+            j_idx = idx
+            
+    # Matching jauge stock
+    s_matched = 50
+    for s in paliers_stock:
+        if stock >= s:
+            s_matched = s
+            
+    base = grille[s_matched][j_idx]
+    if stock > 500:
+        base = grille[500][j_idx] * (stock / 500.0)
+    elif stock < 50:
+        base = grille[50][j_idx]
+        
+    return base
+
+def get_frais_logistiques(stock, nb_reassorts):
+    if stock <= 100:
+        prix_reassort = 150.0
+    elif stock <= 200:
+        prix_reassort = 200.0
+    elif stock <= 300:
+        prix_reassort = 250.0
+    else:
+        prix_reassort = 350.0
+    return LIVRAISON_FIXE + (nb_reassorts * prix_reassort)
 
 def get_tarif_unitaire_perte(taux_perte_ratio):
-    """
-    Règle de tarification selon le taux global de perte :
-    - Strictement inférieur à 5% (< 5%) : 12 € HT par paire perdue
-    - Entre 5% et 10% compris (5% à 10%) : 18 € HT par paire perdue
-    - Strictement supérieur à 10% (> 10%) : 26 € HT par paire perdue
-    """
     if taux_perte_ratio < 0.05:
         return 12.00
     elif taux_perte_ratio <= 0.10:
@@ -104,7 +151,6 @@ def get_tarif_unitaire_perte(taux_perte_ratio):
         return 26.00
 
 def get_seuil_max_pertes(budget_max_penalite, stock_total):
-    """Trouve le nombre max de paires pouvant être perdues avant dépassement budgétaire."""
     if budget_max_penalite <= 0 or stock_total <= 0:
         return 0, 0.0
     max_paires = 0
@@ -132,28 +178,30 @@ budget_jetable = vol_jetable * PRIX_JETABLE
 tarif_unitaire_perte = get_tarif_unitaire_perte(perte_pct)
 amende_pertes = paires_perdues * tarif_unitaire_perte
 forfait_loc = get_forfait_loc(stock_circulaire, jours)
-budget_location = forfait_loc + LIVRAISON_FIXE + amende_pertes
+frais_log = get_frais_logistiques(stock_circulaire, reassorts)
+budget_location = forfait_loc + frais_log + amende_pertes
 cout_usage_achat = ((stock_circulaire * PRIX_NEUF_PAIRE) / 100.0) * jours
 budget_achat = cout_usage_achat + amende_pertes
 
 # Volet déchets plastiques
 dechets_plastique_kg = vol_jetable * POIDS_JETABLE
 
-# Volet eau
-eau_reutilisable_litres = paires_rendues * POIDS_TEXTILE * EAU_LAVAGE_L_KG
+# Volet eau (Méthode officielle Excel)
 eau_jetable_litres = vol_jetable * POIDS_JETABLE * EAU_PLASTIQUE_L_KG
+eau_perdue_unit = POIDS_TEXTILE * EAU_FAB_PA_L_KG * (1.0 - usure_pct)
+eau_rendue_unit = (POIDS_TEXTILE * EAU_FAB_PA_L_KG / 100.0 * jours) + (POIDS_TEXTILE * EAU_LAVAGE_L_KG * jours)
+eau_reutilisable_litres = (paires_perdues * eau_perdue_unit) + (paires_rendues * eau_rendue_unit)
 
-# Volet carbone
+# Volet carbone (Méthode officielle Excel)
 co2_jetable = vol_jetable * POIDS_JETABLE * (FE_PLASTIQUE_FAB + FE_INCINERATION)
 co2_rendue_unit = (
     (POIDS_TEXTILE * FE_PA_FAB / 100.0 * jours) +
-    (POIDS_TEXTILE * EAU_LAVAGE_L_KG / 1000.0 * FE_EAU_M3) +
+    (POIDS_TEXTILE * jours * EAU_LAVAGE_L_KG / 1000.0 * FE_EAU_M3) +
     (POIDS_TEXTILE / 100.0 * jours * FE_RECYCLAGE_PA)
 )
 co2_perdue_unit = POIDS_TEXTILE * ((FE_PA_FAB * (1.0 - usure_pct)) + FE_INCINERATION)
 co2_circulaire_total = (paires_perdues * co2_perdue_unit) + (paires_rendues * co2_rendue_unit)
 
-# Fonction d'aide pour captures d'écran
 def afficher_recap_parametres():
     with st.expander("📋 Paramètres de l'événement associés (pour export / capture d'écran)"):
         r1, r2, r3, r4 = st.columns(4)
@@ -167,7 +215,7 @@ def afficher_recap_parametres():
 # ==============================================================================
 st.markdown("### 📦 Volumétrie et Flux Physiques sur l'Événement")
 f1, f2, f3, f4 = st.columns(4)
-f1.metric("Housses JETABLES consommées", f"{vol_jetable:,} unités".replace(",", " "))
+f1.metric("Paires JETABLES consommées", f"{vol_jetable:,} paires".replace(",", " "))
 f2.metric("Stock RÉUTILISABLE mobilisé", f"{stock_circulaire:,} paires".replace(",", " "))
 f3.metric("Paires perdues / non restituées", f"{paires_perdues:,} paires".replace(",", " "))
 f4.metric("Paires restituées & relavées", f"{paires_rendues:,} paires".replace(",", " "))
@@ -192,43 +240,26 @@ b3.metric(
     delta=f"{budget_jetable - budget_achat:,.0f} € vs Jetable"
 )
 
-# --- BLOC D'ANALYSE DU COÛT SELON LE TAUX DE PERTE ---
 if paires_perdues == 0:
-    st.success(
-        "💡 **Pertes nulles (0 %) :** Aucune pénalité appliquée. "
-        "Le modèle réutilisable est exploité à son efficience économique maximale."
-    )
+    st.success("💡 **Pertes nulles (0 %) :** Aucune pénalité appliquée. Le modèle réutilisable est exploité à son efficience économique maximale.")
 elif perte_pct < 0.05:
-    st.info(
-        f"📊 **Taux de perte < 5 % ({perte_pct_input} %) :** "
-        f"Chaque paire égarée est facturée **12,00 € HT**. "
-        f"Facturation totale des pertes : {paires_perdues} paires × 12,00 € = **{amende_pertes:,.2f} € HT**."
-    )
+    st.info(f"📊 **Taux de perte < 5 % ({perte_pct_input} %) :** Chaque paire égarée est facturée **12,00 € HT**. Facturation totale des pertes : {paires_perdues} paires × 12,00 € = **{amende_pertes:,.2f} € HT**.")
 elif perte_pct <= 0.10:
-    st.warning(
-        f"⚠️ **Taux de perte entre 5 % et 10 % ({perte_pct_input} %) :** "
-        f"Le tarif monte à **18,00 € HT** pour chaque paire égarée. "
-        f"Facturation totale des pertes : {paires_perdues} paires × 18,00 € = **{amende_pertes:,.2f} € HT**."
-    )
+    st.warning(f"⚠️ **Taux de perte entre 5 % et 10 % ({perte_pct_input} %) :** Le tarif monte à **18,00 € HT** pour chaque paire égarée. Facturation totale des pertes : {paires_perdues} paires × 18,00 € = **{amende_pertes:,.2f} € HT**.")
 else:
-    st.error(
-        f"🚨 **Taux de perte > 10 % ({perte_pct_input} %) :** "
-        f"Le tarif maximal s'applique : **26,00 € HT** pour chaque paire égarée. "
-        f"Facturation totale des pertes : {paires_perdues} paires × 26,00 € = **{amende_pertes:,.2f} € HT**."
-    )
+    st.error(f"🚨 **Taux de perte > 10 % ({perte_pct_input} %) :** Le tarif maximal s'applique : **26,00 € HT** pour chaque paire égarée. Facturation totale des pertes : {paires_perdues} paires × 26,00 € = **{amende_pertes:,.2f} € HT**.")
 
 with st.expander("🔍 Méthodologie détaillée : comment sont calculés les budgets et les pertes ?"):
     st.markdown(f"""
-    * **Règle de tarification des pertes textiles :** Le coût unitaire appliqué à l'ensemble des paires égarées dépend directement du taux de perte constaté sur l'événement :
-      * **Moins de 5 % (< 5 %) :** **12,00 € HT** par paire.
-      * **Entre 5 % et 10 % compris (5 % à 10 %) :** **18,00 € HT** par paire.
-      * **Au-delà de 10 % (> 10 %) :** **26,00 € HT** par paire.
-    * **Scénario Jetable :** Achat direct du volume consommé ({vol_jetable:,} housses × {PRIX_JETABLE:.2f} € HT = **{budget_jetable:,.2f} € HT**).
-    * **Scénario Location :** Mise à disposition du parc ({forfait_loc:,.0f} €) + transport logistique ({LIVRAISON_FIXE:,.0f} €) + facturation des {paires_perdues} paires à {tarif_unitaire_perte:.2f} € HT (**{amende_pertes:,.2f} € HT**).
+    * **Règle de tarification des pertes textiles :** Le coût unitaire appliqué à l'ensemble des paires égarées dépend du taux global :
+      * **< 5 % :** **12,00 € HT** par paire.
+      * **5 % à 10 % :** **18,00 € HT** par paire.
+      * **> 10 % :** **26,00 € HT** par paire.
+    * **Scénario Jetable :** Achat direct du volume consommé ({vol_jetable:,} paires × {PRIX_JETABLE:.2f} € HT = **{budget_jetable:,.2f} € HT**).
+    * **Scénario Location :** Forfait selon la grille officielle ({forfait_loc:,.0f} €) + transport initial et reprises ({frais_log:,.0f} €) + pénalités ({amende_pertes:,.2f} € HT).
     * **Scénario Achat d'un stock réutilisable :** Amortissement d'usage sur 100 cycles ({cout_usage_achat:,.2f} €) + rachat des {paires_perdues} paires perdues au tarif de {tarif_unitaire_perte:.2f} € HT (**{amende_pertes:,.2f} € HT**).
     """)
 
-# Graphique Budgets : Ordre strict (Jetable à gauche, Location au centre, Achat à droite)
 df_budget = pd.DataFrame({
     "Option": ["Jetable", "Location", "Achat d'un stock réutilisable"],
     "Coût (€)": [round(budget_jetable), round(budget_location), round(budget_achat)]
@@ -267,9 +298,9 @@ st.subheader("🗑️ Déchets Plastiques Générés")
 
 with st.expander("🔍 Méthodologie détaillée : comment est calculée la masse de déchets ?"):
     st.markdown(f"""
-    * Chaque housse plastique à usage unique pèse **{POIDS_JETABLE * 1000:.0f} grammes**.
-    * Le jetable engendre **{vol_jetable:,} housses jetées**, soit **{dechets_plastique_kg:,.1f} kg de plastique** acheminé vers l'incinération ou l'enfouissement.
-    * Les options réutilisables (Location ou Achat) génèrent **0 kg de déchet à usage unique**, les protections étant nettoyées et réemployées sur les chantiers suivants.
+    * Chaque paire plastique à usage unique pèse **{POIDS_JETABLE * 1000:.0f} grammes**.
+    * Le jetable engendre **{vol_jetable:,} paires jetées**, soit **{dechets_plastique_kg:,.1f} kg de plastique**.
+    * Les options réutilisables génèrent **0 kg de déchet à usage unique**.
     """)
 
 d1, d2 = st.columns(2)
@@ -283,14 +314,12 @@ st.divider()
 # ==============================================================================
 st.subheader("🌿 Bilan Carbone (ACV - Analyse de Cycle de Vie)")
 
-st.info("ℹ️ **Précision méthodologique :** L'empreinte carbone du réutilisable est **rigoureusement identique en Location et en Achat**, car le cycle physique de la surchausse (matière première, blanchisserie et fin de vie) reste strictement le même.")
-
 with st.expander("🔍 Méthodologie détaillée : comment sont calculées les émissions CO2 ?"):
     st.markdown(f"""
     Les facteurs d'émissions sont issus des bases officielles de l'**ADEME** :
-    * **Jetable ({co2_jetable:,.1f} kg CO2) :** Fabrication du polyéthylène vierge ({FE_PLASTIQUE_FAB} kg CO2/kg) + incinération en fin de vie ({FE_INCINERATION} kg CO2/kg).
-    * **Paire réutilisable restituée ({co2_rendue_unit:.3f} kg CO2 / paire) :** Fabrication amortie sur 100 cycles ({FE_PA_FAB} kg CO2/kg de polyamide) + électricité et chaleur du lavage ({FE_EAU_M3} kg CO2/m3 d'eau traitée) + recyclage final ({FE_RECYCLAGE_PA} kg CO2/kg).
-    * **Paire égarée ({co2_perdue_unit:.3f} kg CO2 / paire) :** Selon l'usure choisie ({usure_pct_input} %), sa fabrication neuve est réimputée à l'événement et complétée par son incinération définitive.
+    * **Jetable ({co2_jetable:,.1f} kg CO2) :** Polyéthylène ({FE_PLASTIQUE_FAB} kg CO2/kg) + incinération ({FE_INCINERATION} kg CO2/kg).
+    * **Paire réutilisable restituée ({co2_rendue_unit:.3f} kg CO2 / paire) :** Fabrication amortie sur 100 cycles + lavages quotidiens + recyclage ({FE_RECYCLAGE_PA} kg CO2/kg).
+    * **Paire égarée ({co2_perdue_unit:.3f} kg CO2 / paire) :** Selon l'usure choisie ({usure_pct_input} %), sa fabrication est imputée à l'événement et complétée par son incinération.
     """)
 
 c1, c2 = st.columns(2)
@@ -337,21 +366,21 @@ st.subheader("💧 Consommation d'Eau & Cycles de Lavage")
 
 with st.expander("🔍 Méthodologie détaillée : comment est mesuré l'impact sur la ressource en eau ?"):
     st.markdown(f"""
-    * **Réutilisable (Lavage industriel) :** Les **{paires_rendues} paires restituées** sont nettoyées en blanchisserie industrielle standard. À raison de **15 litres d'eau par kg** lavé et 90 g par paire, chaque lavage consomme **1,35 litre d'eau**. Volume total : **{eau_reutilisable_litres:,.1f} litres**.
-    * **Jetable (Eau virtuelle de fabrication) :** L'extraction et le raffinage du pétrole pour fabriquer le polyéthylène nécessitent environ **10 litres d'eau par kg de plastique vierge** (soit **0,09 litre d'eau par housse**). Pour {vol_jetable:,} housses, l'empreinte eau s'élève à **{eau_jetable_litres:,.1f} litres**.
+    * **Réutilisable :** Lavage en blanchisserie industrielle standard ({EAU_LAVAGE_L_KG} L/kg) + part de fabrication amortie.
+    * **Jetable :** Raffinage du polyéthylène ({EAU_PLASTIQUE_L_KG} L/kg de plastique).
     """)
 
 e1, e2 = st.columns(2)
 diff_eau = eau_jetable_litres - eau_reutilisable_litres
-e1.metric("Eau consommée : Jetable (Fabrication)", f"{eau_jetable_litres:,.0f} L".replace(",", " "))
+e1.metric("Eau consommée : Jetable", f"{eau_jetable_litres:,.0f} L".replace(",", " "))
 e2.metric(
-    "Eau consommée : Réutilisable (Lavage)",
+    "Eau consommée : Réutilisable",
     f"{eau_reutilisable_litres:,.0f} L".replace(",", " "),
-    delta=f"{diff_eau:,.0f} L vs Jetable" if diff_eau >= 0 else f"{diff_eau:,.0f} L vs Jetable"
+    delta=f"{diff_eau:,.0f} L vs Jetable"
 )
 
 df_eau = pd.DataFrame({
-    "Option": ["Jetable (Pétrochimie)", "Réutilisable (Blanchisserie)"],
+    "Option": ["Jetable (Pétrochimie)", "Réutilisable (Lavage & Fab)"],
     "Consommation (Litres)": [round(eau_jetable_litres), round(eau_reutilisable_litres)]
 })
 
@@ -359,13 +388,13 @@ chart_e = alt.Chart(df_eau).mark_bar(size=60).encode(
     x=alt.X(
         "Option:N",
         title=None,
-        sort=["Jetable (Pétrochimie)", "Réutilisable (Blanchisserie)"],
+        sort=["Jetable (Pétrochimie)", "Réutilisable (Lavage & Fab)"],
         axis=alt.Axis(labelAngle=0, labelFontSize=12)
     ),
     y=alt.Y("Consommation (Litres):Q", title="Volume d'eau (Litres)"),
     color=alt.Color(
         "Option:N",
-        scale=alt.Scale(domain=["Jetable (Pétrochimie)", "Réutilisable (Blanchisserie)"], range=["#E67E22", "#3498DB"]),
+        scale=alt.Scale(domain=["Jetable (Pétrochimie)", "Réutilisable (Lavage & Fab)"], range=["#E67E22", "#3498DB"]),
         legend=None
     )
 ).properties(height=280)
@@ -383,11 +412,6 @@ st.divider()
 # ==============================================================================
 st.subheader("🎯 Seuils de Rupture & Sensibilité aux Pertes (Break-Even)")
 
-st.write(
-    "Ce graphique modélise l'évolution budgétaire selon le taux de perte terrain (de 0 % à 100 %). "
-    "**Le coût unitaire de chaque paire perdue est de 12 € (< 5 %), 18 € (5 % à 10 %) et 26 € (> 10 %).**"
-)
-
 pertes_gamme = list(range(0, 101, 1))
 data_courbes = []
 
@@ -396,7 +420,7 @@ for p in pertes_gamme:
     nb_p = round(stock_circulaire * p_ratio)
     tarif_p = get_tarif_unitaire_perte(p_ratio)
     penalite = nb_p * tarif_p
-    cout_loc = forfait_loc + LIVRAISON_FIXE + penalite
+    cout_loc = forfait_loc + frais_log + penalite
     cout_ach = cout_usage_achat + penalite
     
     data_courbes.append({"Taux de perte (%)": p, "Budget (€ HT)": budget_jetable, "Solution": "Jetable (Fixe)"})
@@ -427,10 +451,8 @@ regle_actuelle = alt.Chart(point_actuel).mark_rule(
 
 st.altair_chart(courbe_chart + regle_actuelle, use_container_width=True)
 
-# Calcul précis des seuils de rentabilité
-marge_loc_brute = budget_jetable - (forfait_loc + LIVRAISON_FIXE)
+marge_loc_brute = budget_jetable - (forfait_loc + frais_log)
 pertes_max_loc, seuil_loc_pct = get_seuil_max_pertes(marge_loc_brute, stock_circulaire)
-
 marge_achat_brute = budget_jetable - cout_usage_achat
 pertes_max_achat, seuil_achat_pct = get_seuil_max_pertes(marge_achat_brute, stock_circulaire)
 
@@ -441,10 +463,10 @@ k1, k2 = st.columns(2)
 with k1:
     st.markdown("#### 💶 Arbitrage Économique")
     if marge_loc_brute < 0:
-        surcout_base = (forfait_loc + LIVRAISON_FIXE) - budget_jetable
+        surcout_base = (forfait_loc + frais_log) - budget_jetable
         st.error(
             f"🚨 **Location structurellement non rentable :** Pour ce format d'événement ({jours} jours, {personnes} personnes), "
-            f"le forfait de mise à disposition et le transport fixe de 100 € rendent la location plus chère que le plastique **dès le départ, même avec 0 % de perte** "
+            f"le forfait de mise à disposition ({forfait_loc:,.0f} €) et la logistique ({frais_log:,.0f} €) rendent la location plus chère que le plastique **dès le départ, même avec 0 % de perte** "
             f"(surcoût initial de {surcout_base:,.0f} € HT)."
         )
         if marge_achat_brute > 0:
@@ -484,7 +506,7 @@ with k2:
 st.divider()
 
 # ==============================================================================
-# SECTION G : GÉNÉRATEUR DU RAPPORT CLIENT PDF
+# SECTION G : RAPPORT CLIENT PDF
 # ==============================================================================
 st.subheader("📄 Synthèse Client & Export PDF")
 
@@ -510,7 +532,6 @@ def generer_pdf_client():
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    # 1. PARAMETRES
     pdf.set_font("helvetica", "B", 11)
     pdf.set_text_color(31, 78, 121)
     pdf.cell(0, 8, "1. PARAMETRES DE L'EVENEMENT", border="B", new_x="LMARGIN", new_y="NEXT")
@@ -525,7 +546,6 @@ def generer_pdf_client():
     pdf.cell(95, 6, f"- Usure paires perdues : {usure_pct_input} %", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
     
-    # 2. VOLUMETRIE
     pdf.set_font("helvetica", "B", 11)
     pdf.set_text_color(31, 78, 121)
     pdf.cell(0, 8, "2. FLUX PHYSIQUES & INVENTAIRE", border="B", new_x="LMARGIN", new_y="NEXT")
@@ -533,13 +553,12 @@ def generer_pdf_client():
     
     pdf.set_font("helvetica", "", 9)
     pdf.set_text_color(40, 40, 40)
-    pdf.cell(95, 6, f"* Housses jetables consommees : {vol_jetable:,} unites".replace(",", " "), new_x="RIGHT")
+    pdf.cell(95, 6, f"* Housses jetables consommees : {vol_jetable:,} paires".replace(",", " "), new_x="RIGHT")
     pdf.cell(95, 6, f"* Stock reutilisable mobilise : {stock_circulaire:,} paires".replace(",", " "), new_x="LMARGIN", new_y="NEXT")
     pdf.cell(95, 6, f"* Paires perdues / degradees : {paires_perdues:,} paires", new_x="RIGHT")
     pdf.cell(95, 6, f"* Paires lavees et remises en stock : {paires_rendues:,} paires", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
     
-    # 3. BUDGETS
     pdf.set_font("helvetica", "B", 11)
     pdf.set_text_color(31, 78, 121)
     pdf.cell(0, 8, "3. SYNTHESE BUDGETAIRE GLOBALE (TCO)", border="B", new_x="LMARGIN", new_y="NEXT")
@@ -565,7 +584,6 @@ def generer_pdf_client():
     pdf.cell(70, 7, f"{budget_jetable - budget_achat:+,.0f} EUR".replace(",", " "), border=1, align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
     
-    # 4. BILAN ENVIRONNEMENTAL
     pdf.set_font("helvetica", "B", 11)
     pdf.set_text_color(31, 78, 121)
     pdf.cell(0, 8, "4. BILAN ENVIRONNEMENTAL & RESSOURCES (ADEME)", border="B", new_x="LMARGIN", new_y="NEXT")
@@ -595,7 +613,6 @@ def generer_pdf_client():
     pdf.cell(45, 7, f"{diff_eau:+,.0f} L", border=1, align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
     
-    # 5. CONCLUSION DECISIONNELLE (BREAK-EVEN)
     pdf.set_font("helvetica", "B", 11)
     pdf.set_text_color(31, 78, 121)
     pdf.cell(0, 8, "5. CONCLUSION DECISIONNELLE (BREAK-EVEN)", border="B", new_x="LMARGIN", new_y="NEXT")
@@ -604,7 +621,7 @@ def generer_pdf_client():
     pdf.set_font("helvetica", "", 9)
     pdf.set_text_color(40, 40, 40)
     if marge_loc_brute < 0:
-        verdict = f"La location est defavorable face au jetable (+{(forfait_loc + LIVRAISON_FIXE) - budget_jetable:,.0f} EUR des 0% de perte). Privilegier l'achat amorti ou une mutualisation."
+        verdict = f"La location est defavorable face au jetable (+{(forfait_loc + frais_log) - budget_jetable:,.0f} EUR des 0% de perte). Privilegier l'achat amorti ou une mutualisation."
     else:
         verdict = f"La location est recommandee et rentable jusqu'a {pertes_max_loc} paires egarees ({seuil_loc_pct:.0f}% de perte autorisee)."
     
